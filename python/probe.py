@@ -39,7 +39,10 @@ def set_feature(fd, payload):
     fcntl.ioctl(fd, HIDIOCSFEATURE(REPORT_SIZE), buf, True)
 
 def refresh_status(fd):
-    """Mirror vendor tool: send opcode 0x0A with arg 0x04 before reading."""
+    """DO NOT USE on the Mini: sending opcode 0x0A, 0x04 switches the
+    firmware into a mode that returns the HID report descriptor on the
+    next GetFeature. Kept for reference; callers should pass
+    do_refresh=False."""
     frame = [0] * REPORT_SIZE
     frame[0] = 0x0A
     frame[1] = 0x04
@@ -48,7 +51,7 @@ def refresh_status(fd):
     except OSError:
         pass
 
-def snapshot(fd, do_refresh=True):
+def snapshot(fd, do_refresh=False):
     if do_refresh:
         refresh_status(fd)
         time.sleep(0.05)
@@ -74,7 +77,9 @@ def main():
     ap.add_argument("--dev", default="/dev/hidraw10")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_dump = sub.add_parser("dump", help="read and pretty-print status report")
-    p_dump.add_argument("--no-refresh", action="store_true")
+    p_dump.add_argument("--refresh", action="store_true",
+                        help="send opcode 0x0A,0x04 first (DANGEROUS — on Mini "
+                             "this returns HID descriptor instead of status)")
     p_send = sub.add_parser("send", help="send arbitrary feature report and diff status")
     p_send.add_argument("opcode", help="hex byte, e.g. 0x05")
     p_send.add_argument("payload", nargs="*", help="additional hex bytes")
@@ -97,7 +102,7 @@ def main():
     fd = os.open(args.dev, os.O_RDWR)
     try:
         if args.cmd == "dump":
-            rpt = snapshot(fd, do_refresh=not args.no_refresh)
+            rpt = snapshot(fd, do_refresh=args.refresh)
             print(hexdump(rpt))
             print()
             print(f"byte[1] status = 0x{rpt[1]:02X}")

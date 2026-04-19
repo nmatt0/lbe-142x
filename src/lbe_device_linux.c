@@ -117,16 +117,11 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
 
-	if (dev->model == LBE_MINI) {
-		/* Mirror vendor tool: request a status refresh before reading. */
-		uint8_t refresh[REPORT_SIZE] = {0};
-		refresh[0] = LBE_MINI_REFRESH;
-		refresh[1] = 4;
-		if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), refresh) < 0) {
-			perror("HIDIOCSFEATURE (mini refresh)");
-			/* non-fatal — try to read anyway */
-		}
-	}
+	/* No pre-read refresh on Mini: sending opcode 0x0A, 0x04 puts the
+	 * firmware into a mode where the next GetFeature returns the HID
+	 * report descriptor rather than the status report. The vendor tool
+	 * only sends that sequence under a conditional path, not as a
+	 * warm-up before every read. */
 
 	buf[0] = 0x4B; // Report Number
 	res = ioctl(dev->fd, HIDIOCGFEATURE(REPORT_SIZE), buf);

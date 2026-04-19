@@ -43,14 +43,17 @@
  *
  * The Mini firmware answers to opcode 0x04 as a simple flash-frequency
  * write (4 LE bytes at buf[1..4]) — confirmed experimentally. Opcode
- * 0x0A with arg 0x04 is a status-refresh that the vendor tool issues
- * before every GetFeature. Opcode 0x03 in the vendor tool is drive
- * strength (0..3 → 8/16/24/32 mA), NOT temp-freq.
+ * 0x03 is drive strength (0..3 → 8/16/24/32 mA). Opcode 0x0B at
+ * buf[1] with a 16-bit signed value at buf[2..3] is the FLL frequency
+ * trim in ppb; the value is echoed back in the status report at
+ * buf[0x24..0x25].
  *
- * DO NOT send 0x06 to a Mini: it causes a USB detach/reset. */
+ * DO NOT send 0x06 to a Mini: it causes a USB detach/reset.
+ * DO NOT send 0x0A,0x04 either — it puts the firmware into a
+ * descriptor-dump mode where the next GetFeature returns the HID
+ * report descriptor in place of the real status payload. */
 #define LBE_MINI_SET_DRIVE   0x03
 #define LBE_MINI_SET_F1      0x04
-#define LBE_MINI_REFRESH     0x0A
 
 /* Max supported frequency in Hz */
 #define LBE_1420_MAX_FREQ 1600000000UL
