@@ -13,6 +13,7 @@ import sys
 import time
 
 REPORT_SIZE = 60
+INPUT_REPORT_SIZE = 64  # per HID descriptor — live GPS data stream
 
 HIDIOCGFEATURE = lambda n: (3 << 30) | (ord('H') << 8) | (0x07) | (n << 16)
 HIDIOCSFEATURE = lambda n: (3 << 30) | (ord('H') << 8) | (0x06) | (n << 16)
@@ -97,6 +98,12 @@ def main():
                          help="opcodes to skip (0x06 causes USB reset on Mini)")
     p_sweep.add_argument("--arg", type=lambda s: int(s, 0), default=0x00,
                          help="single byte argument placed at buf[1] (default 0)")
+    p_in = sub.add_parser("input",
+                          help="read HID INPUT reports (live GPS data stream)")
+    p_in.add_argument("--count", type=int, default=1,
+                      help="number of reports to read (default 1)")
+    p_in.add_argument("--timeout", type=float, default=3.0,
+                      help="seconds to wait per read (default 3.0)")
     args = ap.parse_args()
 
     fd = os.open(args.dev, os.O_RDWR)
@@ -133,6 +140,24 @@ def main():
                 else:
                     for off, a, b in changes:
                         print(f"  [{off:02x}] {a:02X} -> {b:02X}")
+        elif args.cmd == "input":
+            import select
+            for i in range(args.count):
+                r, _, _ = select.select([fd], [], [], args.timeout)
+                if not r:
+                    print(f"#{i}: timeout after {args.timeout}s — no input report")
+                    continue
+                data = os.read(fd, INPUT_REPORT_SIZE)
+                ts = time.strftime("%H:%M:%S")
+                print(f"#{i} {ts} ({len(data)} bytes):")
+                print(hexdump(data, prefix="  "))
+                if len(data) >= 3:
+                    b2 = data[2]
+                    print(f"  byte[1] signal_loss_count = {data[1]}")
+                    print(f"  byte[2] = 0x{b2:02X}  GPS_ok(bit0)={b2&1}  PLL_lock(bit1)={(b2>>1)&1}")
+                    cno_bytes = [b for b in data[3:32] if b]
+                    if cno_bytes:
+                        print(f"  non-zero satellite bytes in [3..31]: {[hex(b) for b in cno_bytes]}")
         elif args.cmd == "sweep":
             skip = set(args.skip)
             for op in range(args.lo, args.hi + 1):
