@@ -205,7 +205,36 @@ int main(int argc, char *argv[]) {
 		} else if (strcmp(argv[i], "--status") == 0) {
 			if (lbe_get_device_status(dev, &status) == 0) {
 				printf("Device Status (0x%02X):\n", status.raw_status);
-				printf("  GPS Lock: %s\n", (status.raw_status & LBE_GPS_LOCK_BIT) ? "Yes" : "No");
+				if (model == LBE_MINI) {
+					/* On Mini, the feature-report status bit mapped to
+					 * "GPS Lock" is not actually the GPS fix status —
+					 * the real fix comes from UBX-NAV-PVT.fixType on
+					 * the input-report stream. Probe briefly. */
+					/* NAV-PVT arrives at ~2 Hz, input reports at ~250 Hz,
+					 * so scan up to ~1s worth of reports (250) to catch one. */
+					uint8_t rpt[64];
+					int tries = 0;
+					int saw_fix = 0;
+					uint8_t fix_type = 0, num_sv = 0;
+					while (tries++ < 300 && !saw_fix) {
+						if (lbe_mini_read_input(dev, rpt, 50) < 0) continue;
+						if (rpt[2] == 0xB5 && rpt[3] == 0x62 &&
+						    rpt[4] == 0x01 && rpt[5] == 0x07) {
+							fix_type = rpt[28];
+							num_sv = rpt[31];
+							saw_fix = 1;
+						}
+					}
+					if (saw_fix) {
+						printf("  GPS Fix: %s (fixType=0x%02X, numSV=%u)\n",
+						       fix_type >= 2 ? "Yes" : "No",
+						       fix_type, num_sv);
+					} else {
+						printf("  GPS Fix: unknown (no UBX-NAV-PVT seen)\n");
+					}
+				} else {
+					printf("  GPS Lock: %s\n", (status.raw_status & LBE_GPS_LOCK_BIT) ? "Yes" : "No");
+				}
 				printf("  PLL Lock: %s\n", status.pll_locked ? "Yes" : "No");
 				if (model != LBE_MINI) {
 					printf("  Antenna: %s\n", status.antenna_ok ? "OK" : "Short Circuit");
