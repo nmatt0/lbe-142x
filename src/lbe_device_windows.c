@@ -273,6 +273,22 @@ int lbe_set_1pps(struct lbe_device* dev, int enable) {
 	return send_feature_report(dev, buf, REPORT_SIZE);
 }
 
+int lbe_mini_set_drive(struct lbe_device* dev, int level) {
+	uint8_t buf[REPORT_SIZE] = {0};
+	if (dev->model != LBE_MINI) {
+		fprintf(stderr, "--drive is only supported on the Mini\n");
+		return -1;
+	}
+	if (level < 0 || level > 3) {
+		fprintf(stderr, "Drive level must be 0..3 (0=8mA, 1=16mA, 2=24mA, 3=32mA)\n");
+		return -1;
+	}
+	buf[0] = 0x4B; // Report ID
+	buf[1] = LBE_MINI_SET_DRIVE;
+	buf[2] = (uint8_t)level;
+	return send_feature_report(dev, buf, REPORT_SIZE);
+}
+
 int lbe_set_power_level(struct lbe_device* dev, int output, int low_power) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	uint8_t cmdpwrlevel = LBE_1421_SET_PWR1; // code remains the same than lbe 1241 on Windows?

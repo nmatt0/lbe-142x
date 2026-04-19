@@ -38,6 +38,22 @@ def set_feature(fd, payload):
     buf = array.array("B", list(payload) + [0] * (REPORT_SIZE - len(payload)))
     fcntl.ioctl(fd, HIDIOCSFEATURE(REPORT_SIZE), buf, True)
 
+def refresh_status(fd):
+    """Mirror vendor tool: send opcode 0x0A with arg 0x04 before reading."""
+    frame = [0] * REPORT_SIZE
+    frame[0] = 0x0A
+    frame[1] = 0x04
+    try:
+        set_feature(fd, frame)
+    except OSError:
+        pass
+
+def snapshot(fd, do_refresh=True):
+    if do_refresh:
+        refresh_status(fd)
+        time.sleep(0.05)
+    return get_feature(fd)
+
 def hexdump(data, prefix=""):
     lines = []
     for i in range(0, len(data), 16):
@@ -57,30 +73,42 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dev", default="/dev/hidraw10")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("dump", help="read and pretty-print status report")
+    p_dump = sub.add_parser("dump", help="read and pretty-print status report")
+    p_dump.add_argument("--no-refresh", action="store_true")
     p_send = sub.add_parser("send", help="send arbitrary feature report and diff status")
     p_send.add_argument("opcode", help="hex byte, e.g. 0x05")
     p_send.add_argument("payload", nargs="*", help="additional hex bytes")
     p_send.add_argument("--at", type=int, default=1,
                         help="byte offset where payload begins (default 1, right after opcode)")
     p_send.add_argument("--no-status-after", action="store_true")
+    p_send.add_argument("--settle", type=float, default=0.3,
+                        help="seconds between write and re-read (default 0.3)")
     p_freq = sub.add_parser("freq-probe", help="try all known freq-set opcodes at target Hz and diff")
     p_freq.add_argument("hz", type=lambda s: int(s, 0))
+    p_sweep = sub.add_parser("sweep", help="probe opcodes in a range; record every status byte that differs")
+    p_sweep.add_argument("--lo", type=lambda s: int(s, 0), default=0x00)
+    p_sweep.add_argument("--hi", type=lambda s: int(s, 0), default=0x20)
+    p_sweep.add_argument("--skip", type=lambda s: int(s, 0), nargs="*", default=[0x06, 0x09],
+                         help="opcodes to skip (0x06 causes USB reset on Mini)")
+    p_sweep.add_argument("--arg", type=lambda s: int(s, 0), default=0x00,
+                         help="single byte argument placed at buf[1] (default 0)")
     args = ap.parse_args()
 
     fd = os.open(args.dev, os.O_RDWR)
     try:
         if args.cmd == "dump":
-            rpt = get_feature(fd)
+            rpt = snapshot(fd, do_refresh=not args.no_refresh)
             print(hexdump(rpt))
             print()
             print(f"byte[1] status = 0x{rpt[1]:02X}")
             for bit in range(8):
                 print(f"  bit {bit} = {(rpt[1] >> bit) & 1}")
+            freq = rpt[2] | (rpt[3] << 8) | (rpt[4] << 16) | (rpt[5] << 24)
+            print(f"freq[2..5] = {freq} Hz")
         elif args.cmd == "send":
             opcode = int(args.opcode, 16)
             payload_bytes = [int(x, 16) for x in args.payload]
-            before = get_feature(fd)
+            before = snapshot(fd)
             frame = [0] * REPORT_SIZE
             frame[0] = opcode
             for i, b in enumerate(payload_bytes):
@@ -92,14 +120,37 @@ def main():
                 print(f"  ioctl error: {e}")
                 return
             if not args.no_status_after:
-                time.sleep(0.2)
-                after = get_feature(fd)
+                time.sleep(args.settle)
+                after = snapshot(fd)
                 changes = diff(before, after)
                 if not changes:
                     print("  no status bytes changed")
                 else:
                     for off, a, b in changes:
                         print(f"  [{off:02x}] {a:02X} -> {b:02X}")
+        elif args.cmd == "sweep":
+            skip = set(args.skip)
+            for op in range(args.lo, args.hi + 1):
+                if op in skip:
+                    print(f"--- op=0x{op:02X} : SKIPPED ---")
+                    continue
+                before = snapshot(fd)
+                frame = [0] * REPORT_SIZE
+                frame[0] = op
+                frame[1] = args.arg
+                try:
+                    set_feature(fd, frame)
+                except OSError as e:
+                    print(f"--- op=0x{op:02X} : ioctl err {e} — device may be gone ---")
+                    return
+                time.sleep(0.15)
+                after = snapshot(fd)
+                changes = diff(before, after)
+                if changes:
+                    diff_str = " ".join(f"[{o:02x}]{a:02X}->{b:02X}" for o, a, b in changes)
+                    print(f"op=0x{op:02X} arg=0x{args.arg:02X}: {diff_str}")
+                else:
+                    print(f"op=0x{op:02X} arg=0x{args.arg:02X}: no change")
         elif args.cmd == "freq-probe":
             hz = args.hz
             fb = [(hz >> 0) & 0xFF, (hz >> 8) & 0xFF, (hz >> 16) & 0xFF, (hz >> 24) & 0xFF]

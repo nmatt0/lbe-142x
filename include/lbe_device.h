@@ -35,5 +35,7 @@ int lbe_set_frequency_temp(struct lbe_device* dev, int output, uint32_t frequenc
 int lbe_set_pll_mode(struct lbe_device* dev, int fll_mode);
 int lbe_set_1pps(struct lbe_device* dev, int enable);
 int lbe_set_power_level(struct lbe_device* dev, int output, int low_power);
+/* Mini-only: set output drive strength directly (0..3 → 8/16/24/32 mA). */
+int lbe_mini_set_drive(struct lbe_device* dev, int level);
 
 #endif // LBE_DEVICE_H

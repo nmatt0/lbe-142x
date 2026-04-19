@@ -24,6 +24,7 @@ void print_usage(int model) {
 	printf("  --pps <0|1> Enable or disable 1PPS on OUT1 (LBE-1421 only)\n");
 	printf("  --pwr1 <0|1> Set OUT1 power level: normal(0) or low(1)\n");
 	printf("  --pwr2 <0|1> Set OUT2 power level: normal(0) or low(1) (LBE-1421 only)\n");
+	printf("  --drive <0..3> Set Mini OUT1 drive strength: 8/16/24/32 mA (Mini only)\n");
 	printf("  --blink Blink output LED(s) for 3 seconds\n");
 	printf("  --status Display current device status\n");
 }
@@ -151,6 +152,15 @@ int main(int argc, char *argv[]) {
 					}
 				} else {
 					fprintf(stderr, "Invalid power level: %d\n", low_power);
+				}
+			}
+		} else if (strcmp(argv[i], "--drive") == 0) {
+			if (i + 1 < argc) {
+				int level = atoi(argv[++i]);
+				if (lbe_mini_set_drive(dev, level) == 0) {
+					static const char* mA[] = {"8mA", "16mA", "24mA", "32mA"};
+					printf("  Set Mini drive strength to %s\n", mA[level]);
+					changed = 1;
 				}
 			}
 		} else if (strcmp(argv[i], "--blink") == 0) {
