@@ -25,6 +25,7 @@ void print_usage(int model) {
 	printf("  --pwr1 <0|1> Set OUT1 power level: normal(0) or low(1)\n");
 	printf("  --pwr2 <0|1> Set OUT2 power level: normal(0) or low(1) (LBE-1421 only)\n");
 	printf("  --drive <0..3> Set Mini OUT1 drive strength: 8/16/24/32 mA (Mini only)\n");
+	printf("  --gps Dump parsed UBX-NAV-PVT fix info (Mini only)\n");
 	printf("  --blink Blink output LED(s) for 3 seconds\n");
 	printf("  --status Display current device status\n");
 }
@@ -153,6 +154,39 @@ int main(int argc, char *argv[]) {
 				} else {
 					fprintf(stderr, "Invalid power level: %d\n", low_power);
 				}
+			}
+		} else if (strcmp(argv[i], "--gps") == 0) {
+			if (model != LBE_MINI) {
+				fprintf(stderr, "--gps is only supported on the Mini\n");
+				continue;
+			}
+			uint8_t rpt[64];
+			int tries = 0;
+			int got_pvt = 0;
+			while (tries++ < 40 && !got_pvt) {
+				if (lbe_mini_read_input(dev, rpt, 500) < 0) continue;
+				if (rpt[2] == 0xB5 && rpt[3] == 0x62 &&
+				    rpt[4] == 0x01 && rpt[5] == 0x07) {
+					/* UBX-NAV-PVT payload starts at rpt[8] */
+					uint32_t iTOW = rpt[8] | (rpt[9]<<8) | (rpt[10]<<16) | (rpt[11]<<24);
+					uint16_t year = rpt[12] | (rpt[13]<<8);
+					printf("GPS fix via UBX-NAV-PVT:\n");
+					printf("  Date: %04u-%02u-%02u %02u:%02u:%02u UTC\n",
+					       year, rpt[14], rpt[15], rpt[16], rpt[17], rpt[18]);
+					printf("  iTOW: %u ms\n", iTOW);
+					printf("  valid flags: 0x%02X\n", rpt[19]);
+					printf("  fixType: 0x%02X (%s)\n", rpt[28],
+					       rpt[28] == 0 ? "no fix" :
+					       rpt[28] == 2 ? "2D" :
+					       rpt[28] == 3 ? "3D" :
+					       rpt[28] == 4 ? "GNSS+dead-reckoning" : "?");
+					printf("  numSV: %u\n", rpt[31]);
+					got_pvt = 1;
+					changed = 1;
+				}
+			}
+			if (!got_pvt) {
+				fprintf(stderr, "  no UBX-NAV-PVT seen — GPS may not be tracking yet\n");
 			}
 		} else if (strcmp(argv[i], "--drive") == 0) {
 			if (i + 1 < argc) {

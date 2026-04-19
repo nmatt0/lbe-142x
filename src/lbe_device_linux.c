@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <dirent.h>
+#include <stddef.h>
+#include <sys/select.h>
 
 #define REPORT_SIZE 60
 
@@ -56,6 +58,63 @@ static enum lbe_model lbe_model_from_pid(uint16_t pid) {
 	}
 }
 
+/* Send a Mini feature-report command in the wire format the firmware
+ * actually wants: wValue = 0x0300 (Feature, Report ID 0). Linux hidraw
+ * takes the first byte of the ioctl buffer as the Report ID byte that
+ * goes into wValue's low byte, so we have to leave buf[0] = 0 and put
+ * the real opcode at buf[1]. The earlier code put the opcode at buf[0],
+ * which produces wValue = 0x03XX (nonzero ReportID) and the firmware
+ * silently routes most commands down a reduced legacy path — opcode
+ * 0x08 (enable UBX NAV forwarding) and 0x0A (status refresh) do not
+ * work through that path at all. */
+static int mini_send_cmd(struct lbe_device* dev, uint8_t opcode,
+                         const uint8_t* args, size_t arg_len) {
+	uint8_t buf[REPORT_SIZE] = {0};
+	if (arg_len > REPORT_SIZE - 2) return -1;
+	buf[0] = 0;
+	buf[1] = opcode;
+	if (args && arg_len) memcpy(&buf[2], args, arg_len);
+	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
+		perror("HIDIOCSFEATURE");
+		return -1;
+	}
+	return 0;
+}
+
+/* Enable u-blox NAV message forwarding on the Mini. Captured from the
+ * vendor tool: three SET_REPORTs with opcode 0x08 that wrap UBX-CFG-MSG
+ * writes targeting NAV-SVINFO, NAV-CLOCK, and NAV-PVT. Without this,
+ * the input endpoint streams only boot-time UBX ACKs and the firmware
+ * never flips the GPS-OK bit. */
+static int mini_enable_gps_stream(struct lbe_device* dev) {
+	static const uint8_t cfg_nav_svinfo[] = {0x06, 0x01, 0x08, 0x00, 0x01, 0x30, 0x14};
+	static const uint8_t cfg_nav_clock[]  = {0x06, 0x01, 0x08, 0x00, 0x01, 0x22, 0x14};
+	static const uint8_t cfg_nav_pvt[]    = {0x06, 0x01, 0x08, 0x00, 0x01, 0x07, 0x0A};
+	/* 0x0A,0x04 was sent by the vendor tool immediately before the three
+	 * 0x08 writes; it is required to put the firmware into the state
+	 * that actually accepts them. Alone it has no visible effect. */
+	uint8_t refresh[] = {0x04};
+	if (mini_send_cmd(dev, 0x0A, refresh, sizeof refresh) < 0) return -1;
+	/* Drain the descriptor-dump side effect of opcode 0x0A by consuming
+	 * a feature report. The vendor tool's pcap shows two GET_REPORTs
+	 * immediately after the SET_REPORT(0x0A,0x04); the first returns
+	 * the report descriptor in the payload, the second returns normal
+	 * status again. Replicate that here so subsequent --status calls
+	 * see real data. */
+	uint8_t drain[REPORT_SIZE] = {0};
+	drain[0] = 0x4B;
+	(void)ioctl(dev->fd, HIDIOCGFEATURE(REPORT_SIZE), drain);
+	drain[0] = 0x4B;
+	(void)ioctl(dev->fd, HIDIOCGFEATURE(REPORT_SIZE), drain);
+	usleep(10000);
+	if (mini_send_cmd(dev, 0x08, cfg_nav_svinfo, sizeof cfg_nav_svinfo) < 0) return -1;
+	usleep(10000);
+	if (mini_send_cmd(dev, 0x08, cfg_nav_clock, sizeof cfg_nav_clock) < 0) return -1;
+	usleep(10000);
+	if (mini_send_cmd(dev, 0x08, cfg_nav_pvt, sizeof cfg_nav_pvt) < 0) return -1;
+	return 0;
+}
+
 struct lbe_device* lbe_open_device(void) {
 	struct lbe_device* dev = malloc(sizeof(struct lbe_device));
 	if (!dev) return NULL;
@@ -90,6 +149,15 @@ struct lbe_device* lbe_open_device(void) {
 					return NULL;
 				}
 				dev->model = lbe_model_from_pid(dev->raw_info.product);
+				/* On the Mini, u-blox NAV message forwarding is off at
+				 * boot. Kick it on so --status shows real GPS state and
+				 * the input endpoint streams UBX-NAV-PVT / SVINFO /
+				 * CLOCK rather than static boot ACKs. Harmless if it
+				 * was already on (u-blox just re-enables the same
+				 * message rate). */
+				if (dev->model == LBE_MINI) {
+					(void)mini_enable_gps_stream(dev);
+				}
 				closedir(dir);
 				return dev;
 			}
@@ -191,12 +259,13 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 	}
 
 	if (dev->model == LBE_MINI) {
-		/* Simple LE32 freq write at buf[1..4] verified by probe. */
-		buf[0] = LBE_MINI_SET_F1;
-		buf[1] = (frequency >>  0) & 0xff;
-		buf[2] = (frequency >>  8) & 0xff;
-		buf[3] = (frequency >> 16) & 0xff;
-		buf[4] = (frequency >> 24) & 0xff;
+		uint8_t f[4] = {
+			(uint8_t)(frequency >>  0),
+			(uint8_t)(frequency >>  8),
+			(uint8_t)(frequency >> 16),
+			(uint8_t)(frequency >> 24),
+		};
+		return mini_send_cmd(dev, LBE_MINI_SET_F1, f, sizeof f);
 	} else if (dev->model == LBE_1420) {
 		buf[0] = LBE_1420_SET_F1;
 		buf[1] = (frequency >>  0) & 0xff;
@@ -278,49 +347,46 @@ int lbe_set_frequency_temp(struct lbe_device* dev, int output, uint32_t frequenc
 }
 
 int lbe_set_outputs_enable(struct lbe_device* dev, int enable) {
-	uint8_t buf[REPORT_SIZE] = {0};
-	int res;
+	if (dev->model == LBE_MINI) {
+		uint8_t arg = enable ? 0x01 : 0x00;
+		return mini_send_cmd(dev, LBE_142X_EN_OUT, &arg, 1);
+	}
 
+	uint8_t buf[REPORT_SIZE] = {0};
 	buf[0] = LBE_142X_EN_OUT;
 	buf[1] = enable ? (dev->model == LBE_1421_DUALOUT ? 0x03 : 0x01) : 0x00;
-
-	res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
-	if (res < 0) {
+	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
 		perror("HIDIOCSFEATURE");
 		return -1;
 	}
-
 	return 0;
 }
 
 int lbe_blink_leds(struct lbe_device* dev) {
+	if (dev->model == LBE_MINI) {
+		return mini_send_cmd(dev, LBE_142X_BLINK_OUT, NULL, 0);
+	}
 	uint8_t buf[REPORT_SIZE] = {0};
-	int res;
-
 	buf[0] = LBE_142X_BLINK_OUT;
-
-	res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
-	if (res < 0) {
+	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
 		perror("HIDIOCSFEATURE");
 		return -1;
 	}
-
 	return 0;
 }
 
 int lbe_set_pll_mode(struct lbe_device* dev, int fll_mode) {
+	if (dev->model == LBE_MINI) {
+		uint8_t arg = fll_mode ? 0x01 : 0x00;
+		return mini_send_cmd(dev, LBE_142X_SET_PLL, &arg, 1);
+	}
 	uint8_t buf[REPORT_SIZE] = {0};
-	int res;
-
 	buf[0] = LBE_142X_SET_PLL;
 	buf[1] = fll_mode ? 0x01 : 0x00;
-
-	res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
-	if (res < 0) {
+	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
 		perror("HIDIOCSFEATURE");
 		return -1;
 	}
-
 	return 0;
 }
 
@@ -346,8 +412,19 @@ int lbe_set_1pps(struct lbe_device* dev, int enable) {
 	return 0;
 }
 
+int lbe_mini_read_input(struct lbe_device* dev, uint8_t buf64[64], int timeout_ms) {
+	if (dev->model != LBE_MINI) return -1;
+	struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+	fd_set rfds;
+	FD_ZERO(&rfds);
+	FD_SET(dev->fd, &rfds);
+	int r = select(dev->fd + 1, &rfds, NULL, NULL, &tv);
+	if (r <= 0) return -1;
+	ssize_t n = read(dev->fd, buf64, 64);
+	return (n == 64) ? 0 : -1;
+}
+
 int lbe_mini_set_drive(struct lbe_device* dev, int level) {
-	uint8_t buf[REPORT_SIZE] = {0};
 	if (dev->model != LBE_MINI) {
 		fprintf(stderr, "--drive is only supported on the Mini\n");
 		return -1;
@@ -356,13 +433,8 @@ int lbe_mini_set_drive(struct lbe_device* dev, int level) {
 		fprintf(stderr, "Drive level must be 0..3 (0=8mA, 1=16mA, 2=24mA, 3=32mA)\n");
 		return -1;
 	}
-	buf[0] = LBE_MINI_SET_DRIVE;
-	buf[1] = (uint8_t)level;
-	if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf) < 0) {
-		perror("HIDIOCSFEATURE");
-		return -1;
-	}
-	return 0;
+	uint8_t arg = (uint8_t)level;
+	return mini_send_cmd(dev, LBE_MINI_SET_DRIVE, &arg, 1);
 }
 
 int lbe_set_power_level(struct lbe_device* dev, int output, int low_power) {
@@ -380,14 +452,8 @@ int lbe_set_power_level(struct lbe_device* dev, int output, int low_power) {
 		 * Map low_power flag → 0 (high, 32 mA) or 3 (low, 8 mA).
 		 * Caveat: the 1420 and Mini share opcode 0x03 but with
 		 * opposite meaning (1420 uses it for temp-freq). */
-		buf[0] = LBE_MINI_SET_DRIVE;
-		buf[1] = low_power ? 0x03 : 0x00;
-		res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
-		if (res < 0) {
-			perror("HIDIOCSFEATURE");
-			return -1;
-		}
-		return 0;
+		uint8_t arg = low_power ? 0x03 : 0x00;
+		return mini_send_cmd(dev, LBE_MINI_SET_DRIVE, &arg, 1);
 	}
 
 	if (dev->model == LBE_1420) {

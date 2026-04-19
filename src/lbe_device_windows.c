@@ -273,6 +273,12 @@ int lbe_set_1pps(struct lbe_device* dev, int enable) {
 	return send_feature_report(dev, buf, REPORT_SIZE);
 }
 
+int lbe_mini_read_input(struct lbe_device* dev, uint8_t buf64[64], int timeout_ms) {
+	(void)dev; (void)buf64; (void)timeout_ms;
+	fprintf(stderr, "lbe_mini_read_input not implemented on Windows\n");
+	return -1;
+}
+
 int lbe_mini_set_drive(struct lbe_device* dev, int level) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	if (dev->model != LBE_MINI) {
