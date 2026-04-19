@@ -9,6 +9,8 @@ void print_usage(int model) {
 
 	if (model == LBE_1420) {
 		max_freq = LBE_1420_MAX_FREQ;
+	} else if (model == LBE_MINI) {
+		max_freq = LBE_MINI_MAX_FREQ;
 	}
 
 	printf("Usage: lbe-142x [OPTIONS]\n");
@@ -24,6 +26,15 @@ void print_usage(int model) {
 	printf("  --pwr2 <0|1> Set OUT2 power level: normal(0) or low(1) (LBE-1421 only)\n");
 	printf("  --blink Blink output LED(s) for 3 seconds\n");
 	printf("  --status Display current device status\n");
+}
+
+static const char* lbe_model_name(enum lbe_model model) {
+	switch (model) {
+	case LBE_1420:         return "1420";
+	case LBE_1421_DUALOUT: return "1421 dual output";
+	case LBE_MINI:         return "Mini (single output)";
+	}
+	return "unknown";
 }
 
 int main(int argc, char *argv[]) {
@@ -48,10 +59,12 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	printf("Connected to LBE-%s\n", model == LBE_1420 ? "1420" : "1421 dual output");
+	printf("Connected to LBE-%s\n", lbe_model_name(model));
 
 	if (model == LBE_1420) {
 		max_freq = LBE_1420_MAX_FREQ;
+	} else if (model == LBE_MINI) {
+		max_freq = LBE_MINI_MAX_FREQ;
 	}
 
 	for (int i = 1; i < argc; i++) {
@@ -61,8 +74,8 @@ int main(int argc, char *argv[]) {
 				int out_no = (argv[i][3] == '1') ? 1 : 2;
 				int temp = (argv[i][4] == 't');
 				
-				if (out_no == 2 && model == LBE_1420) {
-					fprintf(stderr, "LBE-1420 does not support output 2\n");
+				if (out_no == 2 && (model == LBE_1420 || model == LBE_MINI)) {
+					fprintf(stderr, "This model does not support output 2\n");
 					continue;
 				}
 
@@ -125,8 +138,8 @@ int main(int argc, char *argv[]) {
 			}
 		} else if (strcmp(argv[i], "--pwr1") == 0 || strcmp(argv[i], "--pwr2") == 0) {
 			int out_no = argv[i][5] - '0';
-			if (out_no == 2 && model == LBE_1420) {
-				fprintf(stderr, "LBE-1420 does not support output 2\n");
+			if (out_no == 2 && (model == LBE_1420 || model == LBE_MINI)) {
+				fprintf(stderr, "This model does not support output 2\n");
 				continue;
 			}
 			if (i + 1 < argc) {
@@ -150,18 +163,24 @@ int main(int argc, char *argv[]) {
 				printf("Device Status (0x%02X):\n", status.raw_status);
 				printf("  GPS Lock: %s\n", (status.raw_status & LBE_GPS_LOCK_BIT) ? "Yes" : "No");
 				printf("  PLL Lock: %s\n", status.pll_locked ? "Yes" : "No");
-				printf("  Antenna: %s\n", status.antenna_ok ? "OK" : "Short Circuit");
-				printf("  Output(s) Enabled: %s\n", status.outputs_enabled ? "Yes" : "No");
+				if (model != LBE_MINI) {
+					printf("  Antenna: %s\n", status.antenna_ok ? "OK" : "Short Circuit");
+					printf("  Output(s) Enabled: %s\n", status.outputs_enabled ? "Yes" : "No");
+				}
 				printf("  OUT1 Frequency: %u Hz\n", status.frequency1);
-				printf("  OUT1 Power Level: %s\n", status.out1_power_low ? "Low" : "Normal");
-				
+				if (model != LBE_MINI) {
+					printf("  OUT1 Power Level: %s\n", status.out1_power_low ? "Low" : "Normal");
+				}
+
 				if (model == LBE_1421_DUALOUT) {
 					printf("  OUT2 Frequency: %u Hz\n", status.frequency2);
 					printf("  OUT2 Power Level: %s\n", status.out2_power_low ? "Low" : "Normal");
 
 					printf("  1PPS on OUT1: %s\n", status.pps_enabled ? "Enabled" : "Disabled");
 				}
-				printf("  Mode: %s\n", status.fll_enabled ? "FLL" : "PLL");
+				if (model != LBE_MINI) {
+					printf("  Mode: %s\n", status.fll_enabled ? "FLL" : "PLL");
+				}
 			}
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", argv[i]);

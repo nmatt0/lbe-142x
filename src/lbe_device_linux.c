@@ -38,7 +38,22 @@ static int is_lbe_device(const char *path) {
 	}
 
 	close(fd);
-	return (info.vendor == VID_LBE && (info.product == PID_LBE_1420 || info.product == PID_LBE_1421 || PID_LBE_1423));
+	return (info.vendor == VID_LBE &&
+	        (info.product == PID_LBE_1420 ||
+	         info.product == PID_LBE_1421 ||
+	         info.product == PID_LBE_1423 ||
+	         info.product == PID_LBE_MINI));
+}
+
+static enum lbe_model lbe_model_from_pid(uint16_t pid) {
+	switch (pid) {
+	case PID_LBE_1420: return LBE_1420;
+	case PID_LBE_MINI: return LBE_MINI;
+	case PID_LBE_1421:
+	case PID_LBE_1423:
+	default:
+		return LBE_1421_DUALOUT;
+	}
 }
 
 struct lbe_device* lbe_open_device(void) {
@@ -74,7 +89,7 @@ struct lbe_device* lbe_open_device(void) {
 					closedir(dir);
 					return NULL;
 				}
-				dev->model = (dev->raw_info.product == PID_LBE_1420) ? LBE_1420 : LBE_1421_DUALOUT;
+				dev->model = lbe_model_from_pid(dev->raw_info.product);
 				closedir(dir);
 				return dev;
 			}
@@ -102,6 +117,17 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
 
+	if (dev->model == LBE_MINI) {
+		/* Mirror vendor tool: request a status refresh before reading. */
+		uint8_t refresh[REPORT_SIZE] = {0};
+		refresh[0] = LBE_MINI_REFRESH;
+		refresh[1] = 4;
+		if (ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), refresh) < 0) {
+			perror("HIDIOCSFEATURE (mini refresh)");
+			/* non-fatal — try to read anyway */
+		}
+	}
+
 	buf[0] = 0x4B; // Report Number
 	res = ioctl(dev->fd, HIDIOCGFEATURE(REPORT_SIZE), buf);
 	if (res < 0) {
@@ -110,7 +136,22 @@ int lbe_get_device_status(struct lbe_device* dev, struct lbe_status* status) {
 	}
 
 	status->raw_status = buf[1];
-	if (dev->model == LBE_1420) {
+	if (dev->model == LBE_MINI) {
+		/* Mini: freq is a 32-bit LE field at buf[2..5]. Bits in buf[1]:
+		 * bit 0 = GPS lock, bit 1 = PLL lock. Upper bits and the
+		 * "antenna OK" bit from the 1420/1421 spec do not apply — the
+		 * vendor tool does not display antenna state for this model. */
+		status->frequency1 = buf[2] | (buf[3] << 8) | (buf[4] << 16) | (buf[5] << 24);
+		status->frequency2 = 0;
+		status->pll_locked = (status->raw_status & LBE_PLL_LOCK_BIT) != 0;
+		status->outputs_enabled = 0; /* not reliably exposed in this field */
+		status->fll_enabled = 0;
+		status->antenna_ok = 1;  /* report as OK; we can't trust the bit */
+		status->pps_enabled = 0;
+		status->out1_power_low = 0;
+		status->out2_power_low = 0;
+		return 0;
+	} else if (dev->model == LBE_1420) {
 		status->frequency1 = buf[6] | (buf[7] << 8) | (buf[8] << 16) | (buf[9] << 24);
 		status->frequency2 = 0;
 	} else { // LBE_1421
@@ -149,12 +190,19 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
 
-	if (dev->model == LBE_1420 && output != 1) {
-		fprintf(stderr, "LBE-1420 only supports output 1\n");
+	if ((dev->model == LBE_1420 || dev->model == LBE_MINI) && output != 1) {
+		fprintf(stderr, "This model only supports output 1\n");
 		return -1;
 	}
 
-	if (dev->model == LBE_1420) {
+	if (dev->model == LBE_MINI) {
+		/* Simple LE32 freq write at buf[1..4] verified by probe. */
+		buf[0] = LBE_MINI_SET_F1;
+		buf[1] = (frequency >>  0) & 0xff;
+		buf[2] = (frequency >>  8) & 0xff;
+		buf[3] = (frequency >> 16) & 0xff;
+		buf[4] = (frequency >> 24) & 0xff;
+	} else if (dev->model == LBE_1420) {
 		buf[0] = LBE_1420_SET_F1;
 		buf[1] = (frequency >>  0) & 0xff;
 		buf[2] = (frequency >>  8) & 0xff;
@@ -187,6 +235,17 @@ int lbe_set_frequency(struct lbe_device* dev, int output, uint32_t frequency) {
 int lbe_set_frequency_temp(struct lbe_device* dev, int output, uint32_t frequency) {
 	uint8_t buf[REPORT_SIZE] = {0};
 	int res;
+
+	if (dev->model == LBE_MINI) {
+		/* Unknown temp-freq opcode for Mini. On 1420, opcode 0x03 is
+		 * temp-freq; on Mini, the vendor tool uses 0x03 for drive
+		 * strength instead. Sending 0x06 (1421 temp) causes a USB reset.
+		 * Refuse until the correct opcode is identified. */
+		(void)frequency;
+		(void)output;
+		fprintf(stderr, "Temporary frequency is not supported on Mini (use --f1)\n");
+		return -1;
+	}
 
 	if (dev->model == LBE_1420 && output != 1) {
 		fprintf(stderr, "LBE-1420 only supports output 1\n");
@@ -276,6 +335,7 @@ int lbe_set_1pps(struct lbe_device* dev, int enable) {
 
 	if (dev->model != LBE_1421_DUALOUT) {
 		fprintf(stderr, "1PPS control is only supported on LBE-1421\n");
+		(void)enable;
 		return -1;
 	}
 
@@ -296,9 +356,24 @@ int lbe_set_power_level(struct lbe_device* dev, int output, int low_power) {
 	int res;
 	int cmdpwrlevel = LBE_1421_SET_PWR1;
 
-	if (dev->model == LBE_1420 && output != 1) {
-		fprintf(stderr, "LBE-1420 only supports output 1\n");
+	if ((dev->model == LBE_1420 || dev->model == LBE_MINI) && output != 1) {
+		fprintf(stderr, "This model only supports output 1\n");
 		return -1;
+	}
+
+	if (dev->model == LBE_MINI) {
+		/* Mini: opcode 0x03 sets drive strength, 2-bit value.
+		 * Map low_power flag → 0 (high, 32 mA) or 3 (low, 8 mA).
+		 * Caveat: the 1420 and Mini share opcode 0x03 but with
+		 * opposite meaning (1420 uses it for temp-freq). */
+		buf[0] = LBE_MINI_SET_DRIVE;
+		buf[1] = low_power ? 0x03 : 0x00;
+		res = ioctl(dev->fd, HIDIOCSFEATURE(REPORT_SIZE), buf);
+		if (res < 0) {
+			perror("HIDIOCSFEATURE");
+			return -1;
+		}
+		return 0;
 	}
 
 	if (dev->model == LBE_1420) {
